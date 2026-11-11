@@ -1,0 +1,21 @@
+name: Auto Sync Upstream
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # Runs every day at midnight UTC
+  workflow_dispatch: # Allows you to trigger the sync manually from the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Sync upstream changes
+        uses: aormsby/Fork-Sync-Action@v3.4.1
+        with:
+          owner_repo: "reactive-resume/reactive-resume"
+          head_branch: "main" # Change to 'master' if the original repo uses master
+          base_branch: "main" # Change to 'master' if your repo uses master
+          github_token: ${{ secrets.GITHUB_TOKEN }}
