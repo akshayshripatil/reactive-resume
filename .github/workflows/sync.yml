@@ -1,7 +1,4 @@
-
-
-
-          name: Auto Sync Upstream
+name: Auto Sync Upstream
 
 on:
   schedule:
