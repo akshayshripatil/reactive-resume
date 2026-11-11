@@ -1,4 +1,7 @@
-name: Auto Sync Upstream
+
+
+
+          name: Auto Sync Upstream
 
 on:
   schedule:
@@ -8,14 +11,30 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Grants the workflow permissions to push changes to your repo
     steps:
-      - name: Checkout repository
+      - name: Checkout your repository
         uses: actions/checkout@v4
-
-      - name: Sync upstream changes
-        uses: aormsby/Fork-Sync-Action@v3.4.1
         with:
-          owner_repo: "reactive-resume/reactive-resume"
-          head_branch: "main" # Change to 'master' if the original repo uses master
-          base_branch: "main" # Change to 'master' if your repo uses master
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Pull changes from upstream
+        run: |
+          # Add the original repository as a remote named 'upstream'
+          git remote add upstream https://github.com/reactive-resume/reactive-resume.git
+          
+          # Fetch upstream branches
+          git fetch upstream
+          
+          # Merge changes into your main branch (change 'main' to 'master' if needed)
+          git checkout main
+          git merge upstream/main --allow-unrelated-histories
+          
+          # Push the updated branch back to your repository
+          git push origin main
