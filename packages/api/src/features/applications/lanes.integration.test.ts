@@ -1018,7 +1018,7 @@ describe.skipIf(!databaseUrl)("application lanes: persisted owner and workflow i
 		expect((await pool.query("SELECT id FROM create_request WHERE id = $1", [newId])).rows).toEqual([{ id: newId }]);
 	});
 
-	it.each(["resumeFile", "coverLetterFile"] as const)(
+	it.each(["resumeFile", "coverLetterFile", "postingFile"] as const)(
 		"binds the creation receipt to %s bytes before accepting a retry",
 		async (slot) => {
 			const { applicationsRouter } = await import("./router");
@@ -1092,7 +1092,7 @@ describe.skipIf(!databaseUrl)("application lanes: persisted owner and workflow i
 			jobDescription: "Figma and SQL.",
 		});
 		expect((await copies()).map((row) => [row.id, row.applicationId, row.name])).toEqual([
-			[id, savedJob?.id, "Base — Fieldnote"],
+			[id, savedJob?.id, "Base · Fieldnote"],
 		]);
 		const [baseRow] = await getDb().select().from(tables.resume).where(eq(tables.resume.id, base));
 		expect(baseRow?.applicationId).toBeNull();

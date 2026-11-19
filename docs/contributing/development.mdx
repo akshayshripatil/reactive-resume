@@ -1,6 +1,6 @@
 ---
 title: "Development setup"
-description: "Run Reactive Resume locally with Node.js 24, pnpm, and Docker, then use the everyday commands for the database, tests, linting, and pull requests."
+description: "Run Reactive Resume locally with Node.js 26, pnpm, and Docker, then use the everyday commands for the database, tests, linting, and pull requests."
 ---
 
 This guide takes you from a fresh clone to a running local copy of Reactive Resume, then covers the commands you'll use while working on it. For how the code is organized, read [Project architecture](/contributing/architecture).
@@ -9,7 +9,7 @@ This guide takes you from a fresh clone to a running local copy of Reactive Resu
 
 You need:
 
-- **[Node.js](https://nodejs.org/) 24.** The version is pinned in `.nvmrc` and the root `engines` field, so `nvm use` or `fnm use` picks it up.
+- **[Node.js](https://nodejs.org/) 26.** The version is pinned in `.nvmrc` and the root `engines` field, so `nvm use` or `fnm use` picks it up.
 - **[pnpm](https://pnpm.io/installation) 12.** Use the exact version in the root `packageManager` field. pnpm switches to that version automatically when you run it inside the repository.
 - **[Docker](https://docs.docker.com/get-docker/) with Docker Compose** for PostgreSQL, Redis, and S3-compatible storage. Start the Docker daemon first.
 - **[Git](https://git-scm.com/).**
@@ -21,9 +21,12 @@ Run every command from the repository root unless a step says otherwise.
 <Steps>
   <Step title="Clone the repository">
     ```bash
-    git clone https://github.com/reactive-resume/reactive-resume.git
+    git clone --filter=blob:none https://github.com/reactive-resume/reactive-resume.git
     cd reactive-resume
     ```
+
+    `--filter=blob:none` downloads the full commit history but only the current files, which keeps the clone near 130 MB instead of over 2 GB. Git fetches older file versions when a command such as `git blame` or `git checkout` needs them.
+
   </Step>
 
     <Step title="Install dependencies">
@@ -110,7 +113,7 @@ Use `pnpm dev:web` to start only Vite. API calls still need a server running.
 
 ## Everyday commands
 
-[Vite+](https://viteplus.dev/) supplies the project-local `vp` CLI for Vite builds/dev servers, Vitest tests, Oxlint, and Oxfmt. Run it with `pnpm exec vp`; no global install is needed. Turbo still schedules workspace tasks and checks package boundaries, while tsdown packages the server and DeepSeek plugin. Root `vite.config.ts` owns lint and formatting settings; package `vitest.config.ts` files retain isolated test configuration.
+[Vite+](https://viteplus.dev/) supplies the project-local `vp` CLI for Vite builds/dev servers, Vitest tests, Oxlint, and Oxfmt. Run it with `pnpm exec vp`; no global install is needed. Turbo still schedules workspace tasks and checks package boundaries, while `vp pack` (tsdown) packages the server and DeepSeek plugin. Root `vite.config.ts` owns lint and formatting settings; package `vitest.config.ts` files retain isolated test configuration.
 
 Keep the pinned `vite-plus` catalog version and `vite` override together. The `vitest` override and `@vitest/coverage-v8` must match Vite+'s bundled Vitest version (`pnpm exec vp toolchain vitest`). The Vite Plus extension pack uses the same tools and root config as scripts and hooks.
 
@@ -246,7 +249,7 @@ const label = t`Download PDF`;
 <Trans>Your resume is ready.</Trans>;
 ```
 
-Then run `pnpm lingui:extract`. It updates the web catalogs in `apps/web/locales/*.po` and regenerates the PDF section-title catalog. For native app strings, also run `pnpm --filter mobile lingui:extract`. Fill and review the affected translations in both apps before release; the repository has no automatic Crowdin synchronization workflow. See [Contributing translations](/contributing/translations).
+Then run `pnpm lingui:extract`. It updates the web catalogs in `apps/web/locales/*.po`, the mobile catalogs in `apps/mobile/locales/*.po` (seeding empty entries from matching web translations), and regenerates the PDF section-title catalog. Fill and review the affected translations in both apps before release; the repository has no automatic Crowdin synchronization workflow. See [Contributing translations](/contributing/translations).
 
 ## Code style
 
@@ -323,7 +326,7 @@ Alongside the release's changelog entry:
     </Accordion>
 
     <Accordion title="A server dependency fails to load on Vercel">
-      CommonJS server dependencies must be bundled. Add the package and its dependencies to `bundledInteropPackages` in `apps/server/tsdown.config.ts`. See [Deployment checks](/contributing/deployment-checks).
+      CommonJS server dependencies must be bundled. Add the package and its dependencies to `bundledInteropPackages` in `apps/server/vite.config.ts`. See [Deployment checks](/contributing/deployment-checks).
     </Accordion>
 
 </AccordionGroup>

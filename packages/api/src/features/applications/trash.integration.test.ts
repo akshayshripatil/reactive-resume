@@ -187,6 +187,32 @@ describe.skipIf(!databaseUrl)("application Trash: real retained rows, storage an
 		}
 	});
 
+	it("keeps posting PDF bytes through Trash and export, then removes them on purge", async () => {
+		const client = api();
+		const id = await client.create({ company: "Fictional Cedar", role: "Lead" });
+		const file = new File(["%PDF-1.7 original posting"], "posting.pdf", { type: "application/pdf" });
+		await expect(api("bob").attachDocument({ id, kind: "posting", file })).rejects.toMatchObject({ code: "NOT_FOUND" });
+		const attached = await client.attachDocument({ id, kind: "posting", file });
+		expect((await client.getById({ id })).postingFileName).toBe("posting.pdf");
+		const url = attached.postingFileUrl;
+		if (!url) throw new Error("Missing posting PDF URL");
+		const key = new URL(url, "http://localhost:3000").pathname.replace(/^\/(?:api\/)?/, "");
+		await client.trash({ id });
+		const backup = await (
+			await import("../auth/service")
+		).authService.exportData({ userId: "alice", includeUploads: true });
+		expect(backup.uploads?.files).toContainEqual({
+			key,
+			base64: Buffer.from(await file.arrayBuffer()).toString("base64"),
+		});
+		await client.restore(await trashRow(id));
+		expect((await client.getById({ id })).postingFileUrl).toBe(url);
+		expect((await storage.read(key))?.data).toEqual(Buffer.from(await file.arrayBuffer()));
+		await client.trash({ id });
+		await client.purge(await trashRow(id));
+		expect(await storage.read(key)).toBeNull();
+	});
+
 	it("retains timeline, linked snapshots, workspace, facts, coach and real attachment bytes across reload/restore", async () => {
 		await getDb()
 			.insert(tables.resume)
@@ -560,5 +586,44 @@ describe.skipIf(!databaseUrl)("application Trash: real retained rows, storage an
 		await api().restore(await trashRow(id));
 		const story = (await getDb().select().from(tables.careerStory))[0];
 		expect(story?.data.factIds).toEqual([]);
+	});
+
+	it("Empty Trash deletes only this account's trashed applications", async () => {
+		const kept = await api().create({ company: "Fictional Active", role: "Kept" });
+		const gone = await api().create({ company: "Fictional Trashed", role: "Gone" });
+		const other = await api("bob").create({ company: "Fictional Other", role: "Kept" });
+		await api().trash({ id: gone });
+		await api("bob").trash({ id: other });
+		await expect(api("alice", ["read", "write"]).emptyTrash({})).rejects.toMatchObject({ code: "FORBIDDEN" });
+		await expect(api().emptyTrash({})).resolves.toEqual({ deleted: 1 });
+		expect(await raw(gone)).toBeUndefined();
+		expect(await raw(kept)).toBeDefined();
+		expect((await api("bob").listTrash({})).items.map((row) => row.id)).toEqual([other]);
+	});
+
+	it("expires Trash after 30 days, counting applications trashed before the rule from its start date", async () => {
+		const { applicationService } = await import("./service");
+		const old = await api().create({ company: "Fictional Old", role: "Before the rule" });
+		const recent = await api().create({ company: "Fictional Recent", role: "Inside 30 days" });
+		await api().trash({ id: old });
+		await api().trash({ id: recent });
+		await pool.query("UPDATE application SET trashed_at=$2 WHERE id=$1", [old, new Date("2026-01-01T00:00:00Z")]);
+		await pool.query("UPDATE application SET trashed_at=$2 WHERE id=$1", [recent, new Date("2027-01-20T00:00:00Z")]);
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			// Inside the grace period nothing goes, however long ago it was trashed.
+			vi.setSystemTime(new Date("2026-12-15T00:00:00Z"));
+			await applicationService.purgeExpiredTrash();
+			expect(await raw(old)).toBeDefined();
+			expect((await api().listTrash({})).items.find((row) => row.id === old)?.expiresAt).toEqual(
+				new Date("2026-12-31T00:00:00Z"),
+			);
+			vi.setSystemTime(new Date("2027-02-01T00:00:00Z"));
+			await applicationService.purgeExpiredTrash();
+			expect(await raw(old)).toBeUndefined();
+			expect(await raw(recent)).toBeDefined();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

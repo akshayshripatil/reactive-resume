@@ -137,6 +137,40 @@ describe("resolvePdfFonts", () => {
 		expect(registered).not.toContainEqual(expect.objectContaining({ family: "Noto Sans Symbols 2" }));
 	});
 
+	it("registers the Georgian Noto fallback for Georgian content", () => {
+		const georgianSource = getWebFontSource("Noto Serif Georgian", "400", false);
+		const { registered, registerFonts } = withRegistry();
+
+		const pdfTypography = registerFonts(typography, "en-US", new Set(["georgian"]));
+
+		expect(pdfTypography.body.fontFamily).toEqual(["IBM Plex Serif", "Noto Serif Georgian", "Noto Serif"]);
+		expect(registered).toContainEqual(
+			expect.objectContaining({
+				family: "Noto Serif Georgian",
+				weight: 400,
+				italic: false,
+				src: georgianSource,
+			}),
+		);
+	});
+
+	it("registers the Armenian Noto fallback for Armenian content", () => {
+		const armenianSource = getWebFontSource("Noto Serif Armenian", "400", false);
+		const { registered, registerFonts } = withRegistry();
+
+		const pdfTypography = registerFonts(typography, "en-US", new Set(["armenian"]));
+
+		expect(pdfTypography.body.fontFamily).toEqual(["IBM Plex Serif", "Noto Serif Armenian", "Noto Serif"]);
+		expect(registered).toContainEqual(
+			expect.objectContaining({
+				family: "Noto Serif Armenian",
+				weight: 400,
+				italic: false,
+				src: armenianSource,
+			}),
+		);
+	});
+
 	it("registers the Noto Sans Symbols 2 fallback for text symbols like stars", () => {
 		const symbolsSource = getWebFontSource("Noto Sans Symbols 2", "400", false);
 		const { registered, registerFonts } = withRegistry();
@@ -275,6 +309,15 @@ describe("resumeContentScripts", () => {
 				"khmer",
 			]),
 		);
+	});
+
+	it("detects Georgian text", () => {
+		expect(resumeContentScripts(withSummary("ქართული ენა"))).toEqual(new Set(["georgian"]));
+	});
+
+	it("detects Armenian text, including ligatures", () => {
+		expect(resumeContentScripts(withSummary("Բարև Ձեզ"))).toEqual(new Set(["armenian"]));
+		expect(resumeContentScripts(withSummary("ﬓﬔﬕﬖﬗ"))).toEqual(new Set(["armenian"]));
 	});
 
 	it("returns an empty set for Latin-only content", () => {

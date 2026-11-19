@@ -251,105 +251,6 @@ describe.skipIf(!databaseUrl)("Trash batch operations", () => {
 		expect((await applicationService.listSummary({ userId: "bob" })).items).toEqual([]);
 	});
 
-	it("keeps application-side create/edit/relink/clear two-way, locked and concurrency-safe", async () => {
-		const { applicationService } = await import("../applications/service");
-		const { coverLetterService } = await import("../cover-letters/service");
-		const letter = await coverLetterService.create({ userId: "alice", name: "Prepared" });
-		const first = await applicationService.create({
-			userId: "alice",
-			role: "First",
-			company: "One",
-			coverLetterId: letter.id,
-		});
-		expect(await applicationService.getById({ userId: "alice", id: first })).toMatchObject({
-			coverLetterId: letter.id,
-		});
-		expect(await coverLetterService.getById({ userId: "alice", id: letter.id })).toMatchObject({
-			sourceApplicationId: first,
-		});
-
-		// A second application with the same letter moves it and detaches the old job.
-		const second = await applicationService.create({
-			userId: "alice",
-			role: "Second",
-			company: "Two",
-			coverLetterId: letter.id,
-		});
-		expect(await applicationService.getById({ userId: "alice", id: second })).toMatchObject({
-			coverLetterId: letter.id,
-		});
-		expect(await applicationService.getById({ userId: "alice", id: first })).toMatchObject({ coverLetterId: null });
-		expect(await coverLetterService.getById({ userId: "alice", id: letter.id })).toMatchObject({
-			sourceApplicationId: second,
-		});
-
-		// Editing to another letter points the new letter here and leaves the old letter with its own job.
-		const other = await coverLetterService.create({ userId: "alice", name: "Other" });
-		await applicationService.update({ userId: "alice", id: first, coverLetterId: other.id });
-		expect(await applicationService.getById({ userId: "alice", id: first })).toMatchObject({
-			coverLetterId: other.id,
-		});
-		expect(await coverLetterService.getById({ userId: "alice", id: other.id })).toMatchObject({
-			sourceApplicationId: first,
-		});
-		expect(await coverLetterService.getById({ userId: "alice", id: letter.id })).toMatchObject({
-			sourceApplicationId: second,
-		});
-
-		// Clearing the application detaches the letter too.
-		await applicationService.update({ userId: "alice", id: first, coverLetterId: null });
-		expect(await applicationService.getById({ userId: "alice", id: first })).toMatchObject({ coverLetterId: null });
-		expect(await coverLetterService.getById({ userId: "alice", id: other.id })).toMatchObject({
-			sourceApplicationId: null,
-		});
-
-		// A locked letter cannot be attached.
-		await service.setLocked({ userId: "alice", type: "letter", id: letter.id, isLocked: true });
-		await expect(
-			applicationService.create({
-				userId: "alice",
-				role: "Locked",
-				company: "Three",
-				coverLetterId: letter.id,
-			}),
-		).rejects.toMatchObject({ code: "DOCUMENT_LOCKED" });
-		await service.setLocked({ userId: "alice", type: "letter", id: letter.id, isLocked: false });
-
-		// Another account cannot attach this letter.
-		await expect(
-			applicationService.create({
-				userId: "bob",
-				role: "Foreign",
-				company: "Four",
-				coverLetterId: letter.id,
-			}),
-		).rejects.toMatchObject({ code: "NOT_FOUND" });
-
-		// Concurrent creates leave exactly one owner and a letter side that agrees with it.
-		const results = await Promise.allSettled([
-			applicationService.create({
-				userId: "alice",
-				role: "Race one",
-				company: "Five",
-				coverLetterId: letter.id,
-			}),
-			applicationService.create({
-				userId: "alice",
-				role: "Race two",
-				company: "Six",
-				coverLetterId: letter.id,
-			}),
-		]);
-		const ids = results.map((result) => (result.status === "fulfilled" ? result.value : null));
-		expect(ids.every((id) => id !== null)).toBe(true);
-		const racers = await Promise.all(ids.map((id) => applicationService.getById({ userId: "alice", id: id ?? "" })));
-		const owners = racers.filter((application) => application.coverLetterId === letter.id);
-		expect(owners).toHaveLength(1);
-		expect(await coverLetterService.getById({ userId: "alice", id: letter.id })).toMatchObject({
-			sourceApplicationId: owners[0]?.id,
-		});
-	});
-
 	it("restores only the selected loaded documents that are still in this account's Trash", async () => {
 		const result = await service.restoreMany({
 			userId: "alice",
@@ -894,6 +795,55 @@ describe.skipIf(!databaseUrl)("Trash batch operations", () => {
 		expect(after.items[0]).toMatchObject({ id: "alice-letter", recipient: "Northwind Labs" });
 		expect(after.items[0]?.editedAt).toEqual(content.letter.editedAt);
 	}, 30_000);
+	it("tells an open editor when the library renames, tags, trashes or restores a resume", async () => {
+		await seed();
+		const { publishResumeUpdated } = await import("../resume/events");
+		const published = vi.mocked(publishResumeUpdated);
+		const resumeRef = { userId: "alice", type: "resume" as const, id: "alice-active" };
+		const revision = async () => {
+			const [row] = await getDb()
+				.select({ updatedAt: tables.resume.updatedAt })
+				.from(tables.resume)
+				.where(eq(tables.resume.id, "alice-active"));
+			if (!row) throw new Error("Seeded resume is missing.");
+			return row.updatedAt.toISOString();
+		};
+		const writes = [
+			() => service.rename({ ...resumeRef, name: "Renamed" }),
+			() => service.setTags({ ...resumeRef, tags: ["design"] }),
+			() => service.trash(resumeRef),
+			() => service.restore(resumeRef),
+		];
+
+		for (const write of writes) {
+			published.mockClear();
+			await write();
+			// One event per write, carrying the revision the write left, as the editor's own saves publish.
+			expect(published).toHaveBeenCalledTimes(1);
+			expect(published).toHaveBeenCalledWith({
+				type: "resume.updated",
+				resumeId: "alice-active",
+				userId: "alice",
+				updatedAt: await revision(),
+				mutation: "update",
+			});
+		}
+
+		published.mockClear();
+		await service.restoreMany({
+			userId: "alice",
+			documents: [
+				{ type: "resume", id: "alice-trashed-1" },
+				{ type: "letter", id: "alice-letter" },
+			],
+		});
+		expect(published.mock.calls.map(([event]) => event.resumeId)).toEqual(["alice-trashed-1"]);
+
+		// Letters have no update stream.
+		published.mockClear();
+		await service.rename({ userId: "alice", type: "letter", id: "alice-letter", name: "Renamed letter" });
+		expect(published).not.toHaveBeenCalled();
+	});
 	it("sends a renamed account's old public links to its new username for 30 days, and only its own", async () => {
 		await seed();
 		const oldUsername = `${schemaName}-alice`;

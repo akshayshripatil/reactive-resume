@@ -20,7 +20,7 @@ import {
 	restoreProposalApplications,
 } from "@reactive-resume/resume/proposals";
 import { aiOperationIdsSchema } from "@reactive-resume/schema/ai-usage";
-import { parseResumeData } from "@reactive-resume/schema/resume/data";
+import { parseResumeData, withWebPageCss } from "@reactive-resume/schema/resume/data";
 import { syncResumeDates } from "@reactive-resume/schema/resume/dates";
 import { toast } from "@reactive-resume/ui/components/toast";
 import { generateId } from "@reactive-resume/utils/string";
@@ -415,7 +415,7 @@ async function flushResumeSave(id: string) {
 		const updated = (await orpc.resume.update.call(
 			{
 				id: submitted.id,
-				data: submittedData,
+				data: withWebPageCss(submittedData),
 				...(submitted.aiOperationIds !== undefined ? { aiOperationIds: submitted.aiOperationIds } : {}),
 				sessionId: runtime.sessionId,
 				expectedUpdatedAt: runtime.baseUpdatedAt,
@@ -1359,19 +1359,22 @@ export function useResumeCleanup() {
 				timeout: 0,
 				description:
 					status === "offline"
-						? t`You're offline, so your latest changes aren't saved yet. They're kept on this device until you're back.`
+						? t`You're offline. Reconnect to save your changes before leaving.`
 						: status === "locked"
 							? t`This resume was locked before your latest changes were saved. They're kept on this device: unlock it to save them.`
 							: status === "saving"
 								? t`Still saving your latest changes. They're kept on this device if you leave now.`
 								: t`Couldn't save your latest changes. They're kept on this device: retry, or leave and they'll be back when you open this resume again.`,
-				actionProps: {
-					children: t`Leave anyway`,
-					onClick: () => {
-						leaving = true;
-						proceed?.();
-					},
-				},
+				actionProps:
+					status === "offline"
+						? undefined
+						: {
+								children: t`Leave anyway`,
+								onClick: () => {
+									leaving = true;
+									proceed?.();
+								},
+							},
 				onClose: () => {
 					if (!leaving && !settled) stay?.();
 				},

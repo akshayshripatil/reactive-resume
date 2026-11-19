@@ -6,7 +6,6 @@
 	"exports": {
 		"./icons": "./src/forme/phosphor-icons/all.ts",
 		"./browser": "./src/browser.tsx",
-		"./native": "./src/native.tsx",
 		"./page-map": "./src/page-map.ts",
 		"./semantic-legacy": "./src/semantic/legacy-converter.ts",
 		"./semantic-tree": "./src/semantic/tree.ts",
@@ -37,11 +36,12 @@
 		"fast-png": "^8.0.0",
 		"harfbuzzjs": "1.6.4",
 		"node-html-parser": "^9.0.7",
+		"pdf-lib": "catalog:",
 		"react": "catalog:",
 		"react-reconciler": "0.34.0"
 	},
 	"devDependencies": {
-		"@napi-rs/canvas": "1.1.0",
+		"@napi-rs/canvas": "1.1.1",
 		"@reactive-resume/config": "workspace:*",
 		"@types/react": "catalog:",
 		"@types/react-reconciler": "^0.34.1",

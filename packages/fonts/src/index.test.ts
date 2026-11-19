@@ -42,6 +42,29 @@ describe("getPdfFallbackFontFamilies", () => {
 		expect(getPdfFallbackFontFamilies("Times-Roman", { locale: "th-TH" })).toEqual(["Noto Sans Thai", "Noto Serif"]);
 	});
 
+	it("uses the Georgian Noto fonts for Georgian content", () => {
+		expect(getPdfFallbackFontFamilies("Helvetica", { scripts: ["georgian"] })).toEqual([
+			"Noto Sans Georgian",
+			"Noto Sans",
+		]);
+		expect(getPdfFallbackFontFamilies("Times-Roman", { scripts: ["georgian"] })).toEqual([
+			"Noto Serif Georgian",
+			"Noto Serif",
+		]);
+	});
+
+	it("uses the Armenian Noto fonts for Armenian content and the hy-AM locale", () => {
+		expect(getPdfFallbackFontFamilies("Helvetica", { scripts: ["armenian"] })).toEqual([
+			"Noto Sans Armenian",
+			"Noto Sans",
+		]);
+		expect(getPdfFallbackFontFamilies("Times-Roman", { scripts: ["armenian"] })).toEqual([
+			"Noto Serif Armenian",
+			"Noto Serif",
+		]);
+		expect(getPdfFallbackFontFamilies("Helvetica", { locale: "hy-AM" })).toEqual(["Noto Sans Armenian", "Noto Sans"]);
+	});
+
 	it.each([
 		["hi-IN", "Noto Sans Devanagari", "Noto Sans Devanagari"],
 		["mr-IN", "Noto Sans Devanagari", "Noto Sans Devanagari"],

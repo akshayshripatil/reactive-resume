@@ -1,195 +1,163 @@
 import type { RouterOutput } from "@/api/client";
-import { useLingui } from "@lingui/react/macro";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { t } from "@lingui/core/macro";
+import { ORPCError } from "@orpc/client";
 import { useEffect, useRef, useState } from "react";
-import { View } from "react-native";
+import { useWindowDimensions, View } from "react-native";
 import { MAX_RESUME_FACT_CHARACTERS } from "@reactive-resume/schema/career";
-import { factCategories } from "./fact-categories";
-import { EditorSheet, LoadState, SwitchRow } from "./shared";
-import { client, orpc } from "@/api/client";
-import { getAccountScope, useSession } from "@/auth/session";
-import { workspaceError } from "@/features/workspace/hooks";
-import { Banner, Button, Card, SelectSheet, Text, TextArea, useTheme } from "@/ui";
+import { ResourceState } from "./shared";
+import { useCareerActions, useDocuments } from "@/data";
+import { BottomSheet, Button, Checkbox, FooterBar, ListRow, SheetScrollView, Text, TextField, showToast } from "@/ui";
 
 type Review = RouterOutput["career"]["proposeResumeFacts"];
 type Draft = Review["proposals"][number] & { selected: boolean };
 
-export function ResumeFacts() {
-	const { t } = useLingui();
-	const session = useSession();
-	const scope = session.status === "signed-in" ? getAccountScope() : null;
-	const [open, setOpen] = useState(false);
-	return (
-		<>
-			<Button variant="secondary" label={t`Pull facts from my resume`} onPress={() => setOpen(true)} />
-			{open && scope ? <ReviewResumeFacts key={scope} onClose={() => setOpen(false)} /> : null}
-		</>
-	);
-}
-
-type ReviewResumeFactsProps = { onClose: () => void };
-function ReviewResumeFacts({ onClose }: ReviewResumeFactsProps) {
-	const { t } = useLingui();
-	const { space } = useTheme();
-	const session = useSession();
-	const queryClient = useQueryClient();
-	const [scope] = useState(getAccountScope);
-	const alive = useRef(true);
-	useEffect(() => {
-		alive.current = true;
-		return () => {
-			alive.current = false;
-		};
-	}, []);
-	const current = () => alive.current && scope !== null && scope === getAccountScope();
-	const options = orpc.documents.list.queryOptions({ input: { trashed: false } });
-	const documents = useQuery({
-		...options,
-		queryKey: [...options.queryKey, session.server],
-		enabled: session.status === "signed-in",
-	});
-	const [resumeId, setResumeId] = useState("");
+export function ResumeFactsSheet({ onClose }: { onClose: () => void }) {
+	const { height } = useWindowDimensions();
+	const actions = useCareerActions();
+	const documents = useDocuments({ type: "resume" });
 	const [review, setReview] = useState<Review | null>(null);
 	const [drafts, setDrafts] = useState<Draft[]>([]);
-	const [receipt, setReceipt] = useState<string | null>(null);
-	const preview = useMutation({
-		mutationFn: () => {
-			if (!current() || !scope) throw new Error("Account changed");
-			return client.career.proposeResumeFacts({ resumeId }, { context: { scope } });
-		},
-		onSuccess: (result) => {
-			if (current()) {
-				setReview(result);
-				setDrafts(result.proposals.map((item) => ({ ...item, selected: true })));
-			}
-		},
-	});
-	const save = useMutation({
-		mutationFn: () => {
-			if (!current() || !scope || !review) throw new Error("Account changed");
-			return client.career.saveResumeFacts(
-				{
-					resumeId: review.id,
-					updatedAt: review.updatedAt,
-					proposals: drafts.filter((item) => item.selected).map(({ selected: _selected, ...item }) => item),
-				},
-				{ context: { scope } },
-			);
-		},
-		onSuccess: (result) => {
-			if (current()) {
-				setReview(null);
-				setDrafts([]);
-				setReceipt(
-					t`Saved: ${result.saved}. Skipped: ${result.skipped}. Existing, corrected or switched-off facts stay unchanged.`,
-				);
-				void queryClient.invalidateQueries({ queryKey: orpc.career.facts.key() });
-			}
-		},
-	});
-	const busy = preview.isPending || save.isPending;
+	const [busy, setBusy] = useState(false);
+	const [failure, setFailure] = useState("");
+	const mounted = useRef(false);
+	useEffect(() => {
+		mounted.current = true;
+		return () => {
+			mounted.current = false;
+		};
+	}, []);
+	const close = () => {
+		mounted.current = false;
+		onClose();
+	};
 	const selected = drafts.filter((item) => item.selected);
-	const error = preview.error ?? save.error;
-	const change = (index: number, patch: Partial<Draft>) =>
-		setDrafts((items) => items.map((item, i) => (i === index ? { ...item, ...patch } : item)));
+	const change = (quote: string, patch: Partial<Draft>) =>
+		setDrafts((items) => items.map((item) => (item.quote === quote ? { ...item, ...patch } : item)));
+
+	const preview = async (resumeId: string) => {
+		setBusy(true);
+		setFailure("");
+		try {
+			const result = await actions.proposeResumeFacts({ resumeId });
+			if (!mounted.current) return;
+			setReview(result);
+			setDrafts(result.proposals.map((item) => ({ ...item, selected: !item.forgottenFactId })));
+		} catch {
+			if (mounted.current) setFailure(t`Couldn't load or save resume facts. Try again.`);
+		} finally {
+			if (mounted.current) setBusy(false);
+		}
+	};
+
+	const save = async () => {
+		if (!review || busy || selected.length === 0) return;
+		setBusy(true);
+		setFailure("");
+		try {
+			const { saved, skipped } = await actions.saveResumeFacts({
+				resumeId: review.id,
+				updatedAt: review.updatedAt,
+				proposals: selected.map(({ text, quote, category }) => ({ text, quote, category })),
+				restoreForgottenFactIds: selected.flatMap(({ forgottenFactId }) => (forgottenFactId ? [forgottenFactId] : [])),
+			});
+			if (!mounted.current) return;
+			showToast({
+				message: t`Saved: ${saved}. Skipped: ${skipped}. Existing, corrected or switched-off facts stay unchanged.`,
+			});
+			close();
+		} catch (error) {
+			if (!mounted.current) return;
+			if (error instanceof ORPCError && (error.code === "CONFLICT" || error.code === "NOT_FOUND")) {
+				setReview(null);
+				setFailure(t`This resume is no longer current. Choose a resume and review it again.`);
+			} else setFailure(t`Couldn't load or save resume facts. Try again.`);
+		} finally {
+			if (mounted.current) setBusy(false);
+		}
+	};
+
 	return (
-		<EditorSheet
-			title={t`Pull facts from my resume`}
-			dirty={!!drafts.length}
-			pending={save.isPending}
-			onClose={onClose}
+		<BottomSheet
+			title={review ? t`Review resume facts` : t`Pull facts from my resume`}
+			height={Math.min(640, height * 0.86)}
+			keyboard
+			onClose={close}
+			back={
+				review && !busy
+					? {
+							label: t`Choose another resume`,
+							onPress: () => {
+								setReview(null);
+								setFailure("");
+							},
+						}
+					: undefined
+			}
+			footer={
+				review && drafts.length > 0 ? (
+					<FooterBar bg="raised">
+						<Button
+							label={t`Save selected facts`}
+							disabled={busy || !selected.length || selected.some((item) => !item.text.trim())}
+							tone="primary"
+							block
+							onPress={() => void save()}
+						/>
+					</FooterBar>
+				) : null
+			}
 		>
-			<View style={{ padding: space.s4, gap: space.s3 }}>
-				<Text color="ink3">{t`Choose a resume, then review its excerpts. Nothing goes to an AI provider. Only selected facts are saved to Knowledge for all applications.`}</Text>
-				<LoadState query={documents} />
-				<SelectSheet
-					label={t`Resume`}
-					value={resumeId}
-					disabled={busy || !documents.isSuccess}
-					options={[
-						{ value: "", label: t`Choose a resume` },
-						...(documents.data
+			<SheetScrollView contentContainerStyle={{ padding: 24, gap: 16 }}>
+				{failure && <Text color="dangerText">{failure}</Text>}
+				{!review ? (
+					<ResourceState
+						pending={documents.isPending || busy}
+						error={documents.isError}
+						retry={() => void documents.refetch()}
+					>
+						{!documents.data?.length && <Text>{t`Create or import a resume in Documents first.`}</Text>}
+						{documents.data
 							?.filter((row) => row.type === "resume")
-							.map((row) => ({ value: row.id, label: row.name })) ?? []),
-					]}
-					onChange={(value) => {
-						setResumeId(value);
-						setReview(null);
-						setDrafts([]);
-						setReceipt(null);
-						preview.reset();
-						save.reset();
-					}}
-				/>
-				{documents.isSuccess && !documents.data.some((row) => row.type === "resume") ? (
-					<Text>{t`Create or import a resume in Documents first.`}</Text>
-				) : null}
-				<Button
-					variant="secondary"
-					label={t`Review resume facts`}
-					disabled={!resumeId || busy}
-					loading={preview.isPending}
-					onPress={() => {
-						setReview(null);
-						setDrafts([]);
-						setReceipt(null);
-						save.reset();
-						preview.mutate();
-					}}
-				/>
-				{error ? (
-					<Banner tone="danger" message={workspaceError(error, t`Couldn't load or save resume facts. Try again.`)} />
-				) : null}
-				{receipt ? <Text accessibilityLiveRegion="polite">{receipt}</Text> : null}
-				{review ? (
+							.map((resume) => (
+								<ListRow key={resume.id} title={resume.name} trailing="caret" onPress={() => void preview(resume.id)} />
+							))}
+					</ResourceState>
+				) : (
 					<>
-						<Text variant="title">{review.name}</Text>
-						{!drafts.length ? (
+						{drafts.length === 0 && (
 							<Text>{t`No supported excerpts found. Add a fact manually or choose another resume.`}</Text>
-						) : null}
-						{review.omitted > 0 ? <Text>{t`Some resume text was left out. Add other facts manually.`}</Text> : null}
-						{drafts.map((item, index) => (
-							<Card key={item.quote}>
-								<SwitchRow
-									label={t`Save this fact`}
-									value={item.selected}
-									disabled={save.isPending}
-									onValueChange={(selected) => change(index, { selected })}
+						)}
+						{drafts.map(({ quote, text, selected, forgottenFactId }) => (
+							<View key={quote} style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+								<Checkbox
+									value={selected}
+									saves={false}
+									disabled={busy}
+									accessibilityLabel={
+										forgottenFactId ? t`Re-add this forgotten fact: ${text}` : t`Save this fact: ${text}`
+									}
+									onValueChange={(checked) => change(quote, { selected: checked })}
 								/>
-								<TextArea
-									label={t`Fact`}
-									value={item.text}
-									// Allow supplementary characters within the platform's UTF-16 capacity.
-									maxLength={MAX_RESUME_FACT_CHARACTERS * 2}
-									editable={!save.isPending}
-									onChangeText={(text) => {
-										if (Array.from(text).length <= MAX_RESUME_FACT_CHARACTERS) change(index, { text });
-									}}
-								/>
-								<SelectSheet
-									label={t`Type`}
-									value={item.category}
-									disabled={save.isPending}
-									options={factCategories()}
-									onChange={(category) => change(index, { category })}
-								/>
-								<Text variant="label">{t`Source quotation`}</Text>
-								<Text selectable color="ink3">
-									{item.quote}
-								</Text>
-							</Card>
+								<View style={{ flex: 1, gap: 4 }}>
+									{forgottenFactId && <Text color="ink2">{t`Previously forgotten`}</Text>}
+									<TextField
+										label={t`Fact`}
+										value={text}
+										onChangeText={(value) => change(quote, { text: value })}
+										maxLength={MAX_RESUME_FACT_CHARACTERS}
+										editable={!busy}
+										multiline
+									/>
+									<Text color="ink3">{t`from “${quote}”`}</Text>
+								</View>
+							</View>
 						))}
-						{drafts.length ? (
-							<Button
-								label={t`Save selected facts`}
-								loading={save.isPending}
-								disabled={!selected.length || selected.some((item) => !item.text.trim()) || busy}
-								onPress={() => save.mutate()}
-							/>
-						) : null}
+						{review.omitted > 0 && (
+							<Text color="ink3">{t`Some resume text was left out; add other facts yourself.`}</Text>
+						)}
 					</>
-				) : null}
-			</View>
-		</EditorSheet>
+				)}
+			</SheetScrollView>
+		</BottomSheet>
 	);
 }

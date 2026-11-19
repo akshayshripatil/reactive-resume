@@ -89,6 +89,10 @@ export const application = pg.pgTable(
 		sourceUrl: pg.text("source_url"),
 		jobDescription: pg.text("job_description"),
 		postingSource: pg.jsonb("posting_source").$type<PostingSource>(),
+		// The original job posting kept as an uploaded PDF, so it survives the posting changing or disappearing.
+		// Stored as the storage URL + original filename for display.
+		postingFileUrl: pg.text("posting_file_url"),
+		postingFileName: pg.text("posting_file_name"),
 		// What the posting asks for, as read from it when the application was added.
 		requirements: pg.jsonb("requirements").notNull().$type<string[]>().default([]),
 		matchScore: pg.integer("match_score"),
@@ -129,5 +133,11 @@ export const application = pg.pgTable(
 			foreignColumns: [applicationLane.userId, applicationLane.id],
 		}),
 		pg.index().on(t.userId, t.laneId),
+		// Deleting a resume, a letter or one of their versions looks these up; without an index each lookup reads
+		// every application.
+		pg.index().on(t.resumeId),
+		pg.index().on(t.coverLetterId),
+		pg.index().on(t.sentResumeVersionId),
+		pg.index().on(t.sentCoverLetterVersionId),
 	],
 );

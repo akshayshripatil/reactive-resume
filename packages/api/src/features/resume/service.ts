@@ -27,6 +27,7 @@ import { db } from "@reactive-resume/db/client";
 import * as schema from "@reactive-resume/db/schema";
 import { detachEmbeddedLetters } from "@reactive-resume/resume/cover-letter";
 import { applyResumePatches, describeResumePatchError, ResumePatchError } from "@reactive-resume/resume/patch";
+import { withWebPageCss } from "@reactive-resume/schema/resume/data";
 import { defaultResumeData } from "@reactive-resume/schema/resume/default";
 import { isValidSlug } from "@reactive-resume/schema/resume/slug";
 import { generateId } from "@reactive-resume/utils/string";
@@ -112,13 +113,24 @@ const uniqueConstraint = (error: unknown) => (error as { cause?: { constraint?: 
 const otherPrimary = alias(schema.resume, "other_primary");
 
 /**
- * Makes a resume the account's primary one when the account has none, in its own savepoint: when another resume
- * becomes primary at the same moment, that one keeps the role and this save still succeeds.
+ * Makes a resume the account's primary one when the account has none outside Trash, in its own savepoint: when
+ * another resume becomes primary at the same moment, that one keeps the role and this save still succeeds.
  */
 async function claimPrimaryIfNone(tx: DbOrTx, input: { userId: string; resumeId: string }) {
 	try {
-		await tx.transaction((savepoint) =>
-			savepoint
+		await tx.transaction(async (savepoint) => {
+			// A primary resume in Trash opens nothing and Share can't show it, so the role passes on.
+			await savepoint
+				.update(schema.resume)
+				.set({ isPrimary: false })
+				.where(
+					and(
+						eq(schema.resume.userId, input.userId),
+						eq(schema.resume.isPrimary, true),
+						isNotNull(schema.resume.trashedAt),
+					),
+				);
+			await savepoint
 				.update(schema.resume)
 				.set({ isPrimary: true })
 				.where(
@@ -132,8 +144,8 @@ async function claimPrimaryIfNone(tx: DbOrTx, input: { userId: string; resumeId:
 								.where(and(eq(otherPrimary.userId, input.userId), eq(otherPrimary.isPrimary, true))),
 						),
 					),
-				),
-		);
+				);
+		});
 	} catch (error) {
 		if (uniqueConstraint(error) !== "resume_primary_unique") throw error;
 	}
@@ -482,7 +494,7 @@ function toSharedResumeResponse(
 	};
 }
 
-async function notifyResumeUpdated(event: ResumeUpdatedEvent) {
+export async function notifyResumeUpdated(event: ResumeUpdatedEvent) {
 	try {
 		await publishResumeUpdated(event);
 	} catch (error) {
@@ -597,7 +609,8 @@ export const resumeService = {
 			const updated = await resumeService.update({
 				id: input.resumeId,
 				userId: input.userId,
-				data: version.data,
+				// A version saved without the web page's custom CSS is restored without it.
+				data: withWebPageCss(version.data),
 				aiOperationIds: version.aiOperationIds,
 				expectedUpdatedAt: current.updatedAt,
 				skipAutoSnapshot: true,
@@ -866,6 +879,11 @@ export const resumeService = {
 				}
 
 				const normalizedData = input.data ? parseWritableResumeData(input.data) : undefined;
+				// Apps built before the web page's custom CSS drop `metadata.web.css` from the data they send; keep the
+				// saved stylesheet then. Clearing it sends an empty string.
+				const savedCss = (existing.data as ResumeData | null)?.metadata?.web?.css;
+				if (normalizedData && savedCss && normalizedData.metadata.web?.css === undefined)
+					normalizedData.metadata.web = { showCredit: true, ...normalizedData.metadata.web, css: savedCss };
 				if (normalizedData)
 					await adoptEmbeddedLetters(tx, {
 						userId: input.userId,

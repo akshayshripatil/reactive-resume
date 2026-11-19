@@ -2,6 +2,7 @@ import { isIP } from "node:net";
 import { isAbsolute, join } from "node:path";
 import { createEnv } from "@t3-oss/env-core";
 import { z } from "zod";
+import { isAPIKeyOptional } from "@reactive-resume/ai/defaults";
 import { aiProviderSchema } from "@reactive-resume/ai/types";
 import { findWorkspaceRoot } from "@reactive-resume/utils/monorepo.node";
 import { deploymentEnvironment } from "./deployment";
@@ -225,6 +226,9 @@ export const env = createEnv({
 		AI_AGENT_STEP_TIMEOUT_MS: z.coerce.number().int().positive().max(300_000).default(120_000),
 		AI_AGENT_RUN_TIMEOUT_MS: z.coerce.number().int().positive().max(MAX_AGENT_RUN_TIMEOUT_MS).default(240_000),
 
+		// How MCP clients see the api_* tools: listed one by one, behind api_search + api_execute, or not at all.
+		MCP_API_TOOLS: z.enum(["all", "search", "none"]).default("all"),
+
 		// Feature Flags
 		FLAG_DISABLE_SIGNUPS: z.stringbool().default(false),
 		FLAG_DISABLE_EMAIL_AUTH: z.stringbool().default(false),
@@ -252,9 +256,11 @@ if (
 
 if (
 	(env.AI_PROVIDER || env.AI_MODEL || env.AI_API_KEY || env.AI_BASE_URL) &&
-	(!env.AI_PROVIDER || !env.AI_MODEL || (!env.AI_API_KEY && env.AI_PROVIDER !== "ollama"))
+	(!env.AI_PROVIDER || !env.AI_MODEL || (!env.AI_API_KEY && !isAPIKeyOptional(env.AI_PROVIDER)))
 ) {
-	throw new Error("Server AI requires AI_PROVIDER, AI_MODEL and AI_API_KEY (the key is optional for Ollama).");
+	throw new Error(
+		"Server AI requires AI_PROVIDER, AI_MODEL and AI_API_KEY (the key is optional for Ollama and OpenAI-compatible servers).",
+	);
 }
 
 // `.env.example` is public, and production Compose loads it as the base `env_file`: its secrets would let anyone sign

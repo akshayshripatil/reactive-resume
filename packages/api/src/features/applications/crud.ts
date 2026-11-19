@@ -18,7 +18,19 @@ export const crudRouter = {
 		.input(z.object(paginationShape).default({}))
 		.output(
 			z.object({
-				items: z.array(z.object({ id: z.string(), company: z.string(), role: z.string(), trashedAt: z.date() })),
+				items: z.array(
+					z.object({
+						id: z.string(),
+						company: z.string(),
+						role: z.string(),
+						location: z.string().nullable().describe("Where the job is, as saved."),
+						status: z
+							.enum(["saved", "applied", "screening", "interview", "offer", "closed"])
+							.describe("The stage the application was at when it moved to Trash."),
+						trashedAt: z.date(),
+						expiresAt: z.date().describe("When Trash deletes this application permanently (30 days)."),
+					}),
+				),
 				total: z.number().int(),
 			}),
 		)
@@ -53,6 +65,20 @@ export const crudRouter = {
 		.use(resumeMutationRateLimit)
 		.output(z.void())
 		.handler(({ input, context }) => applicationService.purge({ ...input, userId: context.user.id })),
+	emptyTrash: protectedProcedure
+		.route({
+			method: "DELETE",
+			path: "/applications/trash",
+			tags: ["Applications"],
+			operationId: "emptyApplicationTrash",
+			summary: "Empty the application Trash",
+			description:
+				"Permanently deletes every application in this account's Trash, not only the ones the client has loaded. Active applications, and linked resumes and letters, are kept.",
+		})
+		.input(z.object({}).optional())
+		.use(resumeMutationRateLimit)
+		.output(z.object({ deleted: z.number().int().nonnegative() }))
+		.handler(({ context }) => applicationService.emptyTrash({ userId: context.user.id })),
 	trash: protectedProcedure
 		.route({
 			method: "POST",
@@ -61,7 +87,7 @@ export const crudRouter = {
 			operationId: "trashApplication",
 			summary: "Move an application to Trash",
 			description:
-				"Retains the timeline, relationships and files until explicitly permanently deleted. Restore from Trash after reload.",
+				"Retains the timeline, relationships and files in Trash for 30 days, then deletes them permanently. Restore from Trash before then.",
 		})
 		.input(applicationDto.delete.input)
 		.use(resumeMutationRateLimit)
@@ -281,7 +307,7 @@ export const crudRouter = {
 			operationId: "attachApplicationDocument",
 			summary: "Attach an application document",
 			description:
-				"Uploads and attaches a PDF document to an application. Kind must be either resume or cover-letter. Requires authentication.",
+				"Uploads and attaches a PDF document to an application. Kind is resume, cover-letter or posting (the original job posting). Requires authentication.",
 			successDescription: "The updated application.",
 			spec: (current) => {
 				const requestBody = current.requestBody;
@@ -318,7 +344,7 @@ export const crudRouter = {
 			operationId: "removeApplicationDocument",
 			summary: "Remove an application document",
 			description:
-				"Removes a resume or cover-letter PDF from an application and clears the stored document fields. Requires authentication.",
+				"Removes a resume, cover-letter or posting PDF from an application and clears the stored document fields. Requires authentication.",
 			successDescription: "The updated application.",
 		})
 		.input(applicationDto.removeDocument.input)
@@ -460,7 +486,7 @@ export const crudRouter = {
 			operationId: "deleteApplication",
 			summary: "Delete a job application",
 			description:
-				"Moves a job application to Trash, retaining its timeline, relationships and files. Restore from Trash after reload. Requires authentication.",
+				"Moves a job application to Trash, retaining its timeline, relationships and files for 30 days. Restore from Trash before then. Requires authentication.",
 			successDescription: "The application was deleted successfully.",
 		})
 		.input(applicationDto.delete.input)

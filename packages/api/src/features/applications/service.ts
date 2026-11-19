@@ -9,7 +9,7 @@ import type {
 } from "@reactive-resume/schema/applications/data";
 import { createHash } from "node:crypto";
 import { ORPCError } from "@orpc/client";
-import { and, arrayContains, count, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, arrayContains, asc, count, desc, eq, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { db } from "@reactive-resume/db/client";
 import * as schema from "@reactive-resume/db/schema";
 import { lintResumeForAts } from "@reactive-resume/resume/ats";
@@ -372,13 +372,14 @@ function storageKeyFromApplicationUrl(userId: string, value: string | null | und
 
 async function deleteApplicationAttachments(
 	userId: string,
-	applications: Pick<EditableFields, "resumeFileUrl" | "coverLetterUrl">[],
+	applications: Pick<EditableFields, "resumeFileUrl" | "coverLetterUrl" | "postingFileUrl">[],
 ) {
 	const candidateKeys = [
 		...new Set(
 			applications.flatMap((application) => [
 				storageKeyFromApplicationUrl(userId, application.resumeFileUrl),
 				storageKeyFromApplicationUrl(userId, application.coverLetterUrl),
+				storageKeyFromApplicationUrl(userId, application.postingFileUrl),
 			]),
 		),
 	].filter((key): key is string => !!key);
@@ -389,6 +390,7 @@ async function deleteApplicationAttachments(
 		.select({
 			resumeFileUrl: schema.application.resumeFileUrl,
 			coverLetterUrl: schema.application.coverLetterUrl,
+			postingFileUrl: schema.application.postingFileUrl,
 		})
 		.from(schema.application)
 		.where(eq(schema.application.userId, userId));
@@ -397,6 +399,7 @@ async function deleteApplicationAttachments(
 		remainingApplications.flatMap((application) => [
 			storageKeyFromApplicationUrl(userId, application.resumeFileUrl),
 			storageKeyFromApplicationUrl(userId, application.coverLetterUrl),
+			storageKeyFromApplicationUrl(userId, application.postingFileUrl),
 		]),
 	);
 	const keys = candidateKeys.filter((key) => !referencedKeys.has(key));
@@ -475,6 +478,19 @@ async function trashApplications(userId: string, ids: string[]) {
 	return { deleted: result.deleted };
 }
 
+/** Trash keeps an application for 30 days, the same rule as documents (documents/service.ts). */
+const TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+/**
+ * Applications had no expiry before this rule shipped. Anything already in Trash then counts its 30 days from this
+ * date, so nothing a person parked there under the old promise disappears early. Set to the release date.
+ */
+const TRASH_RETENTION_FROM = Date.UTC(2026, 11, 1);
+
+/** When an application trashed at this time is deleted permanently. */
+function trashExpiresAt(trashedAt: Date) {
+	return new Date(Math.max(trashedAt.getTime(), TRASH_RETENTION_FROM) + TRASH_RETENTION_MS);
+}
+
 async function lockedTrash(tx: DbOrTx, input: { userId: string; id: string; trashedAt: Date }) {
 	await lockUser(tx, input.userId);
 	const [row] = await tx
@@ -525,18 +541,25 @@ async function followInterviewSchedules(
 				inArray(schema.careerJob.status, ["queued", "running"]),
 			),
 		);
-	for (const schedule of schedules)
+	const now = Date.now();
+	for (const schedule of schedules) {
+		const nextRunAt = at
+			? prepareRunAt(at, (schedule.lead ?? "24h") as "24h" | "2h" | "morning", schedule.timezone)
+			: null;
 		await tx
 			.update(schema.careerSchedule)
 			.set(
-				at
+				nextRunAt
 					? {
-							nextRunAt: prepareRunAt(at, (schedule.lead ?? "24h") as "24h" | "2h" | "morning", schedule.timezone),
+							nextRunAt,
 							lastQueuedAt: null,
+							// As when a schedule is saved: a lead that has already passed never becomes an immediate paid run.
+							...(nextRunAt.getTime() <= now ? { enabled: false } : {}),
 						}
 					: { enabled: false },
 			)
 			.where(eq(schema.careerSchedule.id, schedule.id));
+	}
 	if (at || !schedules.some((schedule) => schedule.enabled)) return;
 	await tx.insert(schema.careerNotification).values({
 		userId,
@@ -554,19 +577,29 @@ function documentFields(kind: ApplicationDocumentKind) {
 				url: "resumeFileUrl",
 				name: "resumeFileName",
 			} as const)
-		: ({
-				file: "coverLetterFile",
-				url: "coverLetterUrl",
-				name: "coverLetterName",
-			} as const);
+		: kind === "posting"
+			? ({
+					file: "postingFile",
+					url: "postingFileUrl",
+					name: "postingFileName",
+				} as const)
+			: ({
+					file: "coverLetterFile",
+					url: "coverLetterUrl",
+					name: "coverLetterName",
+				} as const);
 }
 
 type UploadedDocumentFields = Pick<
 	EditableFields,
-	"resumeFileUrl" | "resumeFileName" | "coverLetterUrl" | "coverLetterName"
+	"resumeFileUrl" | "resumeFileName" | "coverLetterUrl" | "coverLetterName" | "postingFileUrl" | "postingFileName"
 >;
 
-type DocumentFiles = { resumeFile?: File | undefined; coverLetterFile?: File | undefined };
+type DocumentFiles = {
+	resumeFile?: File | undefined;
+	coverLetterFile?: File | undefined;
+	postingFile?: File | undefined;
+};
 
 // One request owns the uploads and record write; browser dismissal cannot strand an upload.
 async function withDocumentFiles<T>(
@@ -576,8 +609,8 @@ async function withDocumentFiles<T>(
 ) {
 	const uploadedFields: UploadedDocumentFields = {};
 	try {
-		// ponytail: at most two sequential uploads; use allSettled if measured latency warrants concurrency.
-		for (const kind of ["resume", "cover-letter"] as const) {
+		// ponytail: at most three sequential uploads; use allSettled if measured latency warrants concurrency.
+		for (const kind of ["resume", "cover-letter", "posting"] as const) {
 			const fields = documentFields(kind);
 			const file = files[fields.file];
 			if (!file) continue;
@@ -590,7 +623,8 @@ async function withDocumentFiles<T>(
 				contentType: file.type,
 			});
 			uploadedFields[fields.url] = uploaded.url;
-			uploadedFields[fields.name] = file.name;
+			// Native pickers can hand over a nameless Blob; keep a useful filename in that case.
+			uploadedFields[fields.name] = file.name && file.name !== "blob" ? file.name : `${kind}.pdf`;
 		}
 		return await save(uploadedFields);
 	} catch (error) {
@@ -818,8 +852,18 @@ export const applicationService = {
 				stageEnteredAt?: string | undefined;
 			},
 	) => {
-		const { userId, status, laneId, stageEnteredAt, closedReason, resumeFile, coverLetterFile, newId, ...fields } =
-			input;
+		const {
+			userId,
+			status,
+			laneId,
+			stageEnteredAt,
+			closedReason,
+			resumeFile,
+			coverLetterFile,
+			postingFile,
+			newId,
+			...fields
+		} = input;
 		const file = async (value: File | undefined) =>
 			value && {
 				name: value.name,
@@ -833,13 +877,17 @@ export const applicationService = {
 			operation: "applications.create",
 			fields,
 			stage: { status, laneId, closedReason, stageEnteredAt },
-			files: { resume: await file(resumeFile), coverLetter: await file(coverLetterFile) },
+			files: {
+				resume: await file(resumeFile),
+				coverLetter: await file(coverLetterFile),
+				posting: await file(postingFile),
+			},
 		};
 		// A retry of a create that already landed (a lost response, a second press) returns the same application.
 		if (newId && (await isRetriedCreate(db, { table: "application", id: newId, userId, request }))) return newId;
 		await assertOwnedResume(userId, fields.resumeId);
 		await assertOwnedCoverLetter(userId, fields.coverLetterId);
-		return withDocumentFiles(userId, { resumeFile, coverLetterFile }, (uploadedFields) =>
+		return withDocumentFiles(userId, { resumeFile, coverLetterFile, postingFile }, (uploadedFields) =>
 			db.transaction((tx) =>
 				insertApplication(tx, {
 					userId,
@@ -966,6 +1014,7 @@ export const applicationService = {
 			closedReason,
 			resumeFile,
 			coverLetterFile,
+			postingFile,
 			canDeleteAttachments = false,
 			...fields
 		} = input;
@@ -976,7 +1025,9 @@ export const applicationService = {
 					(resumeFile || (fields.resumeFileUrl !== undefined && fields.resumeFileUrl !== current.resumeFileUrl))) ||
 					(current.coverLetterUrl &&
 						(coverLetterFile ||
-							(fields.coverLetterUrl !== undefined && fields.coverLetterUrl !== current.coverLetterUrl))))
+							(fields.coverLetterUrl !== undefined && fields.coverLetterUrl !== current.coverLetterUrl))) ||
+					(current.postingFileUrl &&
+						(postingFile || (fields.postingFileUrl !== undefined && fields.postingFileUrl !== current.postingFileUrl))))
 			)
 				throw new ORPCError("FORBIDDEN", {
 					message: "Replacing or removing an attachment requires api:delete permission.",
@@ -998,7 +1049,7 @@ export const applicationService = {
 		await assertOwnedResume(userId, fields.resumeId);
 		await assertOwnedCoverLetter(userId, fields.coverLetterId);
 
-		return withDocumentFiles(userId, { resumeFile, coverLetterFile }, async (uploadedFields) => {
+		return withDocumentFiles(userId, { resumeFile, coverLetterFile, postingFile }, async (uploadedFields) => {
 			const result = await db.transaction(async (tx) => {
 				await lockUser(tx, userId);
 				const [current] = await tx
@@ -1095,7 +1146,14 @@ export const applicationService = {
 				}
 				return applicationView(result);
 			});
-			if (fields.resumeFileUrl !== undefined || fields.coverLetterUrl !== undefined || resumeFile || coverLetterFile) {
+			if (
+				fields.resumeFileUrl !== undefined ||
+				fields.coverLetterUrl !== undefined ||
+				fields.postingFileUrl !== undefined ||
+				resumeFile ||
+				coverLetterFile ||
+				postingFile
+			) {
 				await deleteApplicationAttachments(userId, [existing]).catch(() => {});
 			}
 			return result;
@@ -1392,6 +1450,8 @@ export const applicationService = {
 					id: schema.application.id,
 					company: schema.application.company,
 					role: schema.application.role,
+					location: schema.application.location,
+					status: schema.application.status,
 					trashedAt: schema.application.trashedAt,
 				})
 				.from(schema.application)
@@ -1402,7 +1462,9 @@ export const applicationService = {
 			db.select({ count: count() }).from(schema.application).where(scope),
 		]);
 		return {
-			items: items.flatMap((row) => (row.trashedAt ? [{ ...row, trashedAt: row.trashedAt }] : [])),
+			items: items.flatMap((row) =>
+				row.trashedAt ? [{ ...row, trashedAt: row.trashedAt, expiresAt: trashExpiresAt(row.trashedAt) }] : [],
+			),
 			total: total?.count ?? 0,
 		};
 	},
@@ -1443,6 +1505,47 @@ export const applicationService = {
 			threads.map((thread) => getStorageService().delete(`uploads/${input.userId}/agent/${thread.id}`)),
 		);
 		await deleteApplicationAttachments(input.userId, [row]);
+	},
+
+	/**
+	 * Empty Trash: permanently deletes every application this account has in Trash, server-side, one generation at a
+	 * time. A concurrent restore wins: that row's purge is refused and it stays.
+	 */
+	emptyTrash: async (input: { userId: string }) => {
+		const rows = await db
+			.select({ id: schema.application.id, trashedAt: schema.application.trashedAt })
+			.from(schema.application)
+			.where(and(eq(schema.application.userId, input.userId), isNotNull(schema.application.trashedAt)));
+		const results = await Promise.allSettled(
+			rows.flatMap((row) =>
+				row.trashedAt ? [applicationService.purge({ userId: input.userId, id: row.id, trashedAt: row.trashedAt })] : [],
+			),
+		);
+		return { deleted: results.filter((result) => result.status === "fulfilled").length };
+	},
+
+	/**
+	 * Applications trashed more than 30 days ago go for good, across all accounts, a batch per scheduler tick. Rows
+	 * trashed before the rule shipped count from TRASH_RETENTION_FROM.
+	 */
+	purgeExpiredTrash: async (limit = 50) => {
+		const now = Date.now();
+		if (now < TRASH_RETENTION_FROM + TRASH_RETENTION_MS) return;
+		const rows = await db
+			.select({
+				id: schema.application.id,
+				userId: schema.application.userId,
+				trashedAt: schema.application.trashedAt,
+			})
+			.from(schema.application)
+			.where(lt(schema.application.trashedAt, new Date(now - TRASH_RETENTION_MS)))
+			.orderBy(asc(schema.application.trashedAt))
+			.limit(limit);
+		await Promise.allSettled(
+			rows.flatMap((row) =>
+				row.trashedAt ? [applicationService.purge({ userId: row.userId, id: row.id, trashedAt: row.trashedAt })] : [],
+			),
+		);
 	},
 
 	bulkUpdate: (input: {
